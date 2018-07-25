@@ -1,0 +1,404 @@
+---
+title: "Data Management"
+author: "Cassandra Bayer"
+date: "7/25/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, warning = F, error = F)
+```
+
+# Setting the Environment
+Before I start my work, I run a global `Controller` file wherein I house my libraries, custom functions, and global options. This allows me to continue my work unimpeded.
+```{r, echo=TRUE}
+setwd("/Users/cassandrabayer/Desktop/Estimating-Treatment-Effects")
+options("scipen" =100, "digits" = 4)
+
+# Load Packages -----------------------------------------------------------
+# load basic packages
+library(data.table)
+library(tidyr)
+library(tidyverse)
+
+# visualization packages
+library(ggplot2)
+library(plotly)
+library(corrplot)
+library(stargazer)
+
+# stats and prediction
+library(stats)
+library(forecast)
+#library(fpp2)
+library(tseries)
+library(Hmisc)
+library(MatchIt)
+
+# Model Selection/Validation
+library(MASS)
+library(glmnet)
+library(car)
+library(ROCR)
+library(pscl)
+library(rpart)
+
+#Dates
+library(zoo)
+library(lubridate)
+
+# Text analysis
+library(RSiteCatalyst)
+library(RTextTools)
+
+# spell check
+sorted_words <- names(sort(table(strsplit(tolower(paste(readLines("http://www.norvig.com/big.txt"), collapse = " ")), "[^a-z]+")), decreasing = TRUE))
+# correct <- function(word) { c(sorted_words[ adist(word, sorted_words) <= min(adist(word, sorted_words), 2)], word)[1] }
+library(qdap)
+#devtools::install_github("ropensci/spelling")
+
+# Load any custom functions -----------------------------------------------
+rowShift <- function(x, shiftLen = 1L) {
+  r <- (1L + shiftLen):(length(x) + shiftLen)
+  r[r<1] <- NA
+  return(x[r])
+}
+
+shift <- function(x, offset = 1, pad = NA) {
+  r <- (1 + offset):(length(x) + offset)
+  r[r<1] <- NA
+  ans <- x[r]
+  ans[is.na(ans)] <- pad
+  return(ans)
+}
+
+maxMissing <- function(x){
+  if(all(is.na(x))){
+    return(NA_real_)
+  } else{
+    return(max(x, na.rm = T))
+  }
+}
+
+nwords <- function(string, pseudo=F){
+  ifelse( pseudo,
+          pattern <- "\\S+",
+          pattern <- "[[:alpha:]]+"
+  )
+  str_count(string, pattern)
+}
+
+wordParser <- function(word){
+  unlist(lapply(seq(nchar(word)), function(x) substr(word, x, x)))
+}
+```
+
+# Pre-Processing
+
+Initially I load the data and convert to data.tables. I use the `data.table` package as it is much more performant.
+As a first pass, I look at the data types of each of columns in each of the tables. Finding that the dates are coded as characters, I coerce them to the data.type `date`, which allows me to manipulate them as if they were integers.  
+```{r, echo=TRUE}
+# Load data  --------------------------------------------------------------
+# Inital loading and basic cleaning
+case <- as.data.table(read.csv("case.csv", stringsAsFactors = F))
+demo <- as.data.table(read.csv("demo.csv",stringsAsFactors = F))
+priorArrests <- as.data.table(read.csv("prior_arrests.csv", stringsAsFactors = F))
+
+# Pre-processing/cleaning -------------------------------------------------------------------------------
+## Get names and data types for all in environment
+sapply(case, class)
+sapply(demo, class)
+sapply(priorArrests, class)
+
+## Update data types
+case[ , c("arrest_date", "dispos_date") := lapply(.SD, as.Date), .SDcols = c("arrest_date", "dispos_date")]
+demo[, bdate := as.Date(bdate)]
+priorArrests[, arrest_date := as.Date(arrest_date)]
+```
+
+# Merges and Reshaping
+Next, I tailor the data structure to what I want it to be. While I want the `case` data to drive the shape of the table, I still need information from the `priorArrest` data to glean if a person has had more arrests outside of what's included in the case. To do so, I create `caseSmall`, which is unique to the `person_id` and `arrest_date` level. Once I have that subsetted data table, I then `rbind` it onto the full  `priorArrests`, which is already unique to the same level. The bind allows me to have a full data set of arrest dates by person. This will come in handy later when I need to calculate the number of prior arrests for each current arrest. 
+<br><br>
+Since I have what I need from the `priorArrest` data in a self-contained table, I then merge the `demo` data onto the `case` data and order it by `person_id`-`arrest_date` combination, which creates the `full` data I then will be working with. Once I do a quick check for missing data (and luckily there is none), I am free to move on.
+```{r, echo=TRUE}
+## Merge 1: Get a comprehensive list of all arrests by person
+caseSmall <- case[, .(person_id, arrest_date)]
+totalArrests <- unique(rbind(caseSmall, priorArrests))
+totalArrests <- totalArrests[order(person_id, arrest_date)]
+
+## Merge 2: demo/case data together
+setkey(case, person_id)
+setkey(demo, person_id)
+full <- demo[case]
+full <- full[order(person_id, arrest_date)]
+
+## Look for completeness of data before proceeding
+sapply(full,function(x) sum(is.na(x)))
+```
+
+# Part 1: Data Management
+## Question 1
+In order to create `re_arrest`, I need to find out whether a person was arrested in between their most recent arrest and their disposition date. To do so, I first find the total number of arrests, `totalArrests`, that a person has within the  `case` data. I then look for where a person has been arrested more than once (since this parameter does not apply to those who have only been arrested once and ineligible to be assigned with the `re_arrest` flag), and where there `arrest_date` is less then the `arrest_date` directly below it (using the `shift` function), and look where the below `arrest_date` is also less than the `dispos_date`. The `data.table` package is a boon in this process as it operates row-by-row. Since the data is already ordered by date, I make this operation perform based on groupings by `person_id` which ensures that the calculations are done by unique arrestee.
+<br><br>
+I do a quick check by looking at all `person_id`s that have any flags for `re_arrest`. A handful of records show me that the calculation was performed properly.
+```{r, echo=TRUE}
+full[, totalArrests := as.integer(uniqueN(arrest_date)), by = person_id]
+full <- full[, re_arrest := 0]
+full[totalArrests > 1 & 
+       (arrest_date < shift(arrest_date, 1) & 
+          shift(arrest_date, 1) < dispos_date), 
+     re_arrest := 1, by = person_id]
+
+## Check my work
+re_arrests <- full[re_arrest==1, unique(person_id)]
+full[person_id %in% re_arrests]
+```
+
+## Question 2
+To generate `prior_requests`, I use the subsetted data table `totalArrests` table generated earlier. I first create an index that itemizes the records, generates a cumulative sum of that index, and subtracts one to denote the number of prior arrests per current arrest. Once I generate that figure, I drop the index, and merge the the `prior_arrest` variable onto the `full` data set. I set the `person_id` and `arrest_date` as the merge key to ensure that the number of prior arrests is aligned to the proper record.
+```{r, echo=TRUE}
+totalArrests[, index := 1]
+totalArrests[, prior_arrests := cumsum(index)-1, by = person_id]
+totalArrests[, index := NULL]
+setkey(totalArrests, person_id, arrest_date)
+setkey(full, person_id, arrest_date)
+full <- totalArrests[full]
+head(full)
+```
+
+## Question 3
+Since I have already converted the data type and ordered the data, all I have to do is simply substract the `bdate` from the `arrest_date` to get the age of the defendant at the time of each arrest. The date automatically calculates this figure in days, so once I divide by 365 and round to the nearest whole number, the age variable is in a useful format.
+<br><br>
+While I do group the age calculation by `person_id`, the `by` parameter is actually not necessary here given the nature of by row calculations in data.table, but it helps to elucidate the intention of the calculation.
+```{r, echo=TRUE}
+full[, age := arrest_date - bdate, by = person_id]
+full[, age := as.integer(age)]
+full[, age := round((age/365),0)]
+head(full)
+```
+
+
+# Quick Look at Distribution
+Before moving on, I want to know if there is an even distribution amongst those who have received the treatment. To do so, I generate some quick tabs to look at the break down of age, race, and gender. While this output it helpful, I also would like to <i>see</i> how the data spreads. I find that age is pretty well distributed, but there is more skew in race. A predominant number of defendants in the sample are black males. 
+<br><br>
+I also want to get a quick glance at the correlatons between variables. A correlation matrix shows me that there are no surprising or meaninful correlations outside the obvious (`arrest_date` and `dispos_date`).
+```{r, echo=TRUE}
+# Quick distributions 
+full[, .N, by = race]
+full[, .N, by = gender]
+
+# Handle the continuous a bit differently
+summary(full$age)
+
+# struncture the date for plotting
+toPlot <- full[, .(arrestYear = year(arrest_date),
+                   race = as.factor(race),
+                   gender = as.factor(gender),
+                   disposYear = year(dispos_date),
+                   treat, totalArrests, re_arrest, age)]
+
+# Plots with facet wrapping so we can get a quick at a glance for all variables (integer vars)
+toPlot %>%
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+  facet_wrap(~ key, scales = "free") +
+  geom_histogram() + theme_minimal()
+
+# Get a correlation plot 
+corData <- cor(toPlot[,.(arrestYear,
+                         disposYear,
+                         treat,
+                         re_arrest,
+                         totalArrests,age)])
+
+corrplot(corData, 
+         type = "upper", 
+         order = "hclust", 
+         tl.col = "black", 
+         tl.srt = 45)
+
+
+```
+
+# Part II: Statistical Analysis
+Before diving in, I reset categorical variables to factors and then drop the ID and date variables since they will not be useful in any models. 
+<br><br>
+Once cleaned up, I can then partition the data into training and test sets. I randomly select 75% of my data as the `train` and then use the remaining data as my `test`. While I could simply select rows, I want to ensure true randomness in my selection. To ensure completeness of the data, I do a quick check to make sure that the sum of the train and test rows are equal to the original data set.
+```{r, echo=TRUE}
+
+# new col and snapshot
+full[, anyReArrest := max(re_arrest), by = person_id]
+fullRaw <- full # keep a raw copy before manipulating
+
+# clean up
+full[,`:=`(race = as.factor(race),
+            gender = as.factor(gender))]
+full <- full[, .SD, .SDcols = !grepl(x = names(full),pattern =  "id|date")]
+
+## split data
+trainData<- floor(0.75 * nrow(full))
+set.seed(8675309)
+trainData <- sample(seq_len(nrow(full)), size = trainData)
+train <-full[trainData]
+test <- full[-trainData]
+nrow(train) + nrow(test) == nrow(full) # gut check
+```
+
+## Model selection
+### Why a logistical regression?
+I chose a logistical regression for a few reasons:
+<br> *My dependent variable is binary
+<br>*I am assessing the impact of the treatment, not necessarily trying to predict what causes `re_arrest`
+<br>*By using a step wise model selection, I can see variable-by-variable the impact on the model and thus the incrememntal decrease in explanatory power of treat
+<br>*The model allows me to understand if the treatment is explaining variation in `re_arrests` or if other independent variables are explaining it.
+
+### Model Applicaton
+The first model that I run is the basic y ~ x: the effect of `treat` on `re_arrests`. A simple correlation shows me a decently low positive relationship, which already seems suspect. This correlation nods to the fact that treatment is associated with a greater probability of getting arrested again prior to disposition. 
+<br><br>
+
+## Model 1
+When I run the basic model, `lm`, I find that the relationship is highly significant, but I sense there is a lot of noise in the model.
+```{r, echo=TRUE}
+# logit regression
+## 1) Simple model to look at relationship between treatment and re_arrest
+cor(x = train$treat, y = train$re_arrest)
+
+lm <- glm(formula = re_arrest ~ treat,
+          data = train,
+          family = binomial(link = 'logit'))
+
+summary(lm)
+```
+
+## Model 2
+On the other end of the spectrum, I run a model with all variables included. While this poses the risk of overfitting, I want to get a sense of the other variables likely causing variation in `re_arrests` outside of treatment. Sure enough, this model shows that the explanatory power of `treat` has all but deflated. We know see that the best predictors of `re_arrests` amongst the variables given are `prior_arrests`, `age`, and `treat` to a lesser degree.
+```{r, echo=TRUE}
+# 2) Full model with all vars --------------------------------------------------------------------------
+lmFull <- glm(formula = re_arrest ~ .,
+              data = train,
+              family = binomial(link = 'logit'))
+
+summary(lmFull)
+
+```
+
+## Model 3
+Once I've run the fullest and sparsest models, I use the stepwise model selection process. `stepAIC` chooses the highest quality model avaiable within your data by estimating the bias-variance tradeoff of each model. The model that it chooses only selects the variables of significance and discards the others to do away with noise.
+```{r, echo=TRUE}
+# Step-wise ---------------------------------------------------------------------------------------------
+## model that returns the lowest deviance in the AIC
+lmStep <- stepAIC(lmFull, direction = "both", 
+                  trace = T)
+summary(lmStep)
+
+```
+
+## Model 4
+Although I'm pleased with the avove model, I'm curious to add some quadratic and interaction variables to see if I can increase the efficiency of my model. I add an `age2` variable that shows me the impact of each <i> additional </i> year, because I assume the relationship is not linear. Similarily with `priorArrests`, I assume the probability of `re_arrest` exponentially increases with each additional prior arrest. I also add an interaction terms for to estimate the effect of `age` and `prior_arrests`. 
+```{r, echo=TRUE}
+full2 <- full #snapshot 
+full2[, `:=`(age2 = age^20, 
+             priorArrests2 = prior_arrests^2,
+             agePriorArrests = age*prior_arrests)]
+
+train2 <- full[1:(.75*nrow(full))]
+test2 <- full[(nrow(train)+1):nrow(full)]
+nrow(train2) + nrow(test2) == nrow(full)
+
+lmFull2 <- glm(formula = re_arrest ~ .,
+               data = train2,
+               family = binomial(link = 'logit'))
+summary(lmFull2)
+
+lmStep2 <- stepAIC(lmFull2, direction = "both", 
+                   trace = T)
+summary(lmStep2)
+```
+
+
+# Model Validation 
+## McFadden's and Chi-Squared Tests as a gut check
+While I can look at the regression output and glean a job well enough done, I look to the Chi Squared test and McFadden's R-Squared (the closest thing to an R-Squared for a logit regression). According the McFadden's $r^{2}$, the second stepwise-generated model using interaction and quadratic terms has more explanatory power. While that is exciting, I suspect that may be due to covariance between the interaction variables and the regular variables. Similarily, the Chi-Squared model confirms that the results I'm seeing are not borne of randomness.
+```{r, echo=TRUE}
+# McFadden's R-Squared
+pR2(lmStep)
+pR2(lmStep2)
+
+# Assess the deviance between our model and the null model
+anova(lmStep, test = "Chisq")
+anova(lmStep2, test = "Chisq")
+
+```
+
+## Bringing in the test data
+I now can apply my models to the test data to see how I've done. I find that the second model is more accurately, but very narrowly. The `predict` package is a succint way to calculate the errors and vectorize them to roll up the model's accuracy.
+```{r, echo=TRUE}
+## Get probabilities for each obs that obs re_arrest = 1
+lmStepProbs <- predict(lmStep,
+                       newdata=test,
+                       type='response')
+
+lmStepProbs2 <- predict(lmStep2,
+                        newdata=test2,
+                        type='response')
+
+## Convert probs > .5 to 1 and lower than .5 to 0
+lmStepResults <- ifelse(lmStepProbs > 0.5,1,0)
+lmStepResults2 <- ifelse(lmStepProbs2 > 0.5,1,0)
+
+# Get our average
+misClasificError <- mean(lmStepResults != test$re_arrest)
+misClasificError2 <- mean(lmStepResults2 != test2$re_arrest)
+```
+
+```{r, echo=TRUE}
+paste0('The accuracy for model w/o interaction vars is ',1-misClasificError,
+                                'and the accuracy for model w/ interaction vars is ', 1-misClasificError2, 
+                                if(misClasificError < misClasificError2){'. Model 1 is more accurate.'}
+                                else {'. Model 2 is more accurate.'})
+
+```
+
+## Area under the ROC Curve 
+I want to see how well my model accurately predicts positives, or `re_arrests` in this case. The ROC curve shows us the trend between false positives and true positives. My AUC relatively strong at 80%, but it still makes me wonder what else is going into the model that I could be missing; perhaps assigment of the treatment itself.
+```{r, echo=TRUE}
+prediction <- prediction(lmStepProbs, test$re_arrest)
+performance <- performance(prediction, measure = "tpr", x.measure = "fpr")
+plot(performance)
+
+auc <- performance(prediction, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
+```
+
+# Thinking about Treatment Assignment
+The lack of explanatory power of the model itself and of `treat` poignantly makes me wonder if there is a systematic difference in those who are receiving treatment. I recognize that more likely there are omitted variables biasing the model that are not within the scope of this data, therefore I will only examine what is in my locus of control.
+<br><br>
+I first develop propensity scores for each record, or the likelihood of `re_arrest` given the variables that have proven to have significant explanatory power. These scores allow me to "match" records of those in the treatment group with others who are similar on given metrics who are not within the treatment group. The theory here is that two people who are, for all intents and purposes the same, should have the same likelihood of `re_arrest` given no treatment; thus, any change in observed rate of `re_arrest` can be attributable to `treat`.
+<br><br> 
+Using "nearest neighbors", or similar propensity scores, 12k records are matched: 6k in the treatment group, and the other 6k not in the treatment group. We see a better balance between the groups given the provided metrics post-matching.
+```{r, echo=TRUE}
+# What if we changed the data? --------------------------------------------------------------------------
+# Propensity score matching ----------------------------------------------------------------------------
+pScores <- matchit(re_arrest ~ age + prior_arrests + treat, 
+                   data = full,
+                   method = "nearest", 
+                   distance = "logit")
+
+summary(pScores)
+
+## Keep only the matched data 
+matchedFull <- data.table(match.data(pScores, distance = "pscore"))
+hist(matchedFull$pscore)
+```
+
+## Were the treatment groups balanced?
+I use a t-test to see whether there is a significant difference in `re_arrest` rates for those who received the treatment adn those who did not. The first model, which is using unmatched data, shows that there is a highly significant difference. However, the significance of treatment is completely lost in the second t-test using the matched data. 
+<br><br>
+These two differing tests suggest that any variation of `re_arrest` rates may not be as attributable to the treatment as one might think. Rather, the variance may be accounted for by non-random assignment, or systematic differences in people that received the treatment and those that did not.
+```{r, echo=TRUE}
+t.test(full[treat == 1]$re_arrest, full[treat == 0]$re_arrest, paired = F)
+t.test(matchedFull[treat==1]$re_arrest,matchedFull[treat==0]$re_arrest,paired = F)
+
+```

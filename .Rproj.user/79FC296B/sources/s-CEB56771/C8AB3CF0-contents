@@ -1,11 +1,11 @@
 # Help determine whether the program should be continued/expanded by estimating its effect on re- arrests prior to disposition. 
 
 # Pre-processing ----------------------------------------------------------------------------------------
-# Let's drop any variables that are date based and id based
-full[, anyReArrest := max(re_arrest), by = person_id]
+# Let's drop any variables that are date based and id based (they w)
 fullRaw <- full
 
 full <- full[, .SD, .SDcols = !grepl(x = names(full),pattern =  "id|date")]
+full[, totalArrests := NULL]
 trainData<- floor(0.75 * nrow(full))
 set.seed(8675309)
 trainData <- sample(seq_len(nrow(full)), size = trainData)
@@ -42,10 +42,8 @@ summary(lmStep)
 # Interaction Variables ---------------------------------------------------------------------------------
 full2 <- full
 full2[, `:=`(age2 = age^20, 
-             totalArrests2 = totalArrests^2,
              priorArrests2 = prior_arrests^2,
-             agePriorArrests = age*prior_arrests,
-             ageTotalArrests = age*totalArrests)]
+             agePriorArrests = age*prior_arrests)]
 
 train2 <- full[1:(.75*nrow(full))]
 test2 <- full[(nrow(train)+1):nrow(full)]
@@ -105,7 +103,7 @@ auc
 
 # What if we changed the data? --------------------------------------------------------------------------
 # Propensity score matching ----------------------------------------------------------------------------
-pScores <- matchit(re_arrest ~ age + prior_arrests + totalArrests + race, 
+pScores <- matchit(re_arrest ~ age + prior_arrests + race, 
                    data = full,
                    method = "nearest", 
                    distance = "logit")
@@ -116,8 +114,9 @@ summary(pScores)
 matchedFull <- data.table(match.data(pScores, distance = "pscore"))
 hist(matchedFull$pscore)
 
-t.test(full[treat == 1]$re_arrest, full[treat == 0]$re_arrest, paired = F)
-t.test(matchedFull[treat==1]$re_arrest,matchedFull[treat==0]$re_arrest,paired = F)
+tTestFull <- t.test(full[treat == 1]$re_arrest, full[treat == 0]$re_arrest, paired = F)
+tTestMatched <- t.test(matchedFull[treat==1]$re_arrest,matchedFull[treat==0]$re_arrest,paired = F)
+
 
 # What is the greatest predictor of rearrests?
 
