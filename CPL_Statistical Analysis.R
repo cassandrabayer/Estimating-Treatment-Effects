@@ -2,6 +2,9 @@
 
 # Pre-processing ----------------------------------------------------------------------------------------
 # Let's drop any variables that are date based and id based
+full[, anyReArrest := max(re_arrest), by = person_id]
+fullRaw <- full
+
 full <- full[, .SD, .SDcols = !grepl(x = names(full),pattern =  "id|date")]
 trainData<- floor(0.75 * nrow(full))
 set.seed(8675309)
@@ -38,9 +41,11 @@ summary(lmStep)
 
 # Interaction Variables ---------------------------------------------------------------------------------
 full2 <- full
-full2[, `:=`(totalArrests2 = totalArrests^2,
-             ageTotalArrests = age*totalArrests,
-             agePriorArrests = age*prior_arrests)]
+full2[, `:=`(age2 = age^20, 
+             totalArrests2 = totalArrests^2,
+             priorArrests2 = prior_arrests^2,
+             agePriorArrests = age*prior_arrests,
+             ageTotalArrests = age*totalArrests)]
 
 train2 <- full[1:(.75*nrow(full))]
 test2 <- full[(nrow(train)+1):nrow(full)]
@@ -69,7 +74,7 @@ lmStepProbs <- predict(lmStep,
                        type='response')
 
 lmStepProbs2 <- predict(lmStep2,
-                        newdata=test,
+                        newdata=test2,
                         type='response')
 
 ## Convert probs > .5 to 1 and lower than .5 to 0
@@ -83,6 +88,7 @@ accuracyMessage <- print(paste0('The accuracy for model w/o interaction vars is 
                                 'and the accuracy for model w/ interaction vars is ', 1-misClasificError2, 
                                 if(misClasificError < misClasificError2){'. Model 1 is more accurate.'}
                                 else {'. Model 2 is more accurate.'}))
+print(accuracyMessage)
 
 # Area under the ROC Curve ------------------------------------------------------------------------------
 prediction <- prediction(lmStepProbs, test$re_arrest)
@@ -104,11 +110,15 @@ pScores <- matchit(re_arrest ~ age + prior_arrests + totalArrests + race,
                    method = "nearest", 
                    distance = "logit")
 
-matchedFull <- dagta.table(match.data(pScores, distance = "pscore"))
-hist(matchedFull$pscore)
-summary(matchedFull$pscore)
+summary(pScores)
 
-t.test(matchedFull[treat==1]$re_arrest,matchedFull[treat==0]$re_arrest,paired = T)
+## Keep only the matched data 
+matchedFull <- data.table(match.data(pScores, distance = "pscore"))
+hist(matchedFull$pscore)
+
+t.test(full[treat == 1]$re_arrest, full[treat == 0]$re_arrest, paired = F)
+t.test(matchedFull[treat==1]$re_arrest,matchedFull[treat==0]$re_arrest,paired = F)
+
 # What is the greatest predictor of rearrests?
 
 # what is the program doing to change behavior?

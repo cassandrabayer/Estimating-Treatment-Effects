@@ -2,6 +2,38 @@
 # Date:
 # Objective: CPL Technical Assessment 
 
+# Load data  --------------------------------------------------------------
+# Inital loading and basic cleaning
+case <- as.data.table(read.csv("case.csv", stringsAsFactors = F))
+demo <- as.data.table(read.csv("demo.csv",stringsAsFactors = F))
+priorArrests <- as.data.table(read.csv("prior_arrests.csv", stringsAsFactors = F))
+
+# Pre-processing/cleaning -------------------------------------------------------------------------------
+## Get names and data types for all in environment
+sapply(case, class)
+sapply(demo, class)
+sapply(priorArrests, class)
+
+## Update data types
+case[ , c("arrest_date", "dispos_date") := lapply(.SD, as.Date), .SDcols = c("arrest_date", "dispos_date")]
+demo[, bdate := as.Date(bdate)]
+priorArrests[, arrest_date := as.Date(arrest_date)]
+
+
+# Merges/binds ------------------------------------------------------------------------------------------
+## Merge 1: Get a comprehensive list of all arrests by person
+caseSmall <- case[, .(person_id, arrest_date)]
+totalArrests <- unique(rbind(caseSmall, priorArrests))
+totalArrests <- totalArrests[order(person_id, arrest_date)]
+
+## Merge 2: demo/case data together
+setkey(case, person_id)
+setkey(demo, person_id)
+full <- demo[case]
+full <- full[order(person_id, arrest_date)]
+
+## Look for completeness of data before proceeding
+sapply(full,function(x) sum(is.na(x)))
 
 # Question 1 --------------------------------------------------------------------------------------------
 # The main outcome of interest is whether the defendant was arrested again prior to his/her disposition 
