@@ -102,6 +102,10 @@ toPlot %>%
 
 corData <- cor(toPlot[,.(arrestYear,disposYear,treat,re_arrest,totalArrests,age)])
 
+# Correlation matrix
 corrplot(corData, type = "upper", order = "hclust", 
          tl.col = "black", tl.srt = 45)
 
+
+# Write the data
+write.csv(x = full, "bayer_transformed data.csv")

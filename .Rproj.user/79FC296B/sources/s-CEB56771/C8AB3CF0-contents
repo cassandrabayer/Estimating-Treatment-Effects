@@ -5,7 +5,6 @@
 fullRaw <- full
 
 full <- full[, .SD, .SDcols = !grepl(x = names(full),pattern =  "id|date")]
-full[, totalArrests := NULL]
 trainData<- floor(0.75 * nrow(full))
 set.seed(8675309)
 trainData <- sample(seq_len(nrow(full)), size = trainData)
@@ -97,9 +96,6 @@ auc <- performance(prediction, measure = "auc")
 auc <- auc@y.values[[1]]
 auc
 
-## Write up resources
-# https://www.r-bloggers.com/how-to-perform-a-logistic-regression-in-r/
-# prior arrests
 
 # What if we changed the data? --------------------------------------------------------------------------
 # Propensity score matching ----------------------------------------------------------------------------
@@ -114,18 +110,7 @@ summary(pScores)
 matchedFull <- data.table(match.data(pScores, distance = "pscore"))
 hist(matchedFull$pscore)
 
+# Compare using t tests
 tTestFull <- t.test(full[treat == 1]$re_arrest, full[treat == 0]$re_arrest, paired = F)
 tTestMatched <- t.test(matchedFull[treat==1]$re_arrest,matchedFull[treat==0]$re_arrest,paired = F)
 
-
-# What is the greatest predictor of rearrests?
-
-# what is the program doing to change behavior?
-
-# how does the program disparately affect people of different ages/gender?
-
-# has the prgram improved over time or degenerated over time? Did it disparately affect people
-
-# How long is the program? 
-
-# When is is given to people?

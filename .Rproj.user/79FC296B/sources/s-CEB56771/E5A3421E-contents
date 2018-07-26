@@ -26,11 +26,11 @@ library(ggplot2)
 library(plotly)
 library(corrplot)
 library(stargazer)
+library(sjPlot)
 
 # stats and prediction
 library(stats)
 library(forecast)
-#library(fpp2)
 library(tseries)
 library(Hmisc)
 library(MatchIt)
@@ -286,8 +286,7 @@ summary(lmFull)
 ## Model 3
 Once I've run the fullest and sparsest models, I use the stepwise model selection process. `stepAIC` chooses the highest quality model avaiable within your data by estimating the bias-variance tradeoff of each model. The model that it chooses only selects the variables of significance and discards the others to do away with noise.
 ```{r, echo=TRUE}
-# Step-wise ---------------------------------------------------------------------------------------------
-## model that returns the lowest deviance in the AIC
+# Step-wise: chooses model that returns the lowest deviance in the AIC
 lmStep <- stepAIC(lmFull, direction = "both", 
                   trace = T)
 summary(lmStep)
@@ -297,7 +296,7 @@ summary(lmStep)
 ## Model 4
 Although I'm pleased with the avove model, I'm curious to add some quadratic and interaction variables to see if I can increase the efficiency of my model. I add an `age2` variable that shows me the impact of each <i> additional </i> year, because I assume the relationship is not linear. Similarily with `priorArrests`, I assume the probability of `re_arrest` exponentially increases with each additional prior arrest. I also add an interaction terms for to estimate the effect of `age` and `prior_arrests`. 
 ```{r, echo=TRUE}
-full2 <- full #snapshot 
+full2 <- full #snapshot before altering
 full2[, `:=`(age2 = age^20, 
              priorArrests2 = prior_arrests^2,
              agePriorArrests = age*prior_arrests)]
@@ -306,6 +305,7 @@ train2 <- full[1:(.75*nrow(full))]
 test2 <- full[(nrow(train)+1):nrow(full)]
 nrow(train2) + nrow(test2) == nrow(full)
 
+## Get a second stepped model with the interaction and quadratic terms
 lmFull2 <- glm(formula = re_arrest ~ .,
                data = train2,
                family = binomial(link = 'logit'))
@@ -361,7 +361,7 @@ paste0('The accuracy for model w/o interaction vars is ',1-misClasificError,
 ```
 
 ## Area under the ROC Curve 
-I want to see how well my model accurately predicts positives, or `re_arrests` in this case. The ROC curve shows us the trend between false positives and true positives. My AUC relatively strong at 80%, but it still makes me wonder what else is going into the model that I could be missing; perhaps assigment of the treatment itself.
+I want to see how well my model accurately predicts positives, or `re_arrests` in this case. The ROC curve shows us the trend between false positives and true positives. My AUC relatively strong at 88%, but it still makes me wonder what else is going into the model that I could be missing; perhaps assigment of the treatment itself.
 ```{r, echo=TRUE}
 prediction <- prediction(lmStepProbs, test$re_arrest)
 performance <- performance(prediction, measure = "tpr", x.measure = "fpr")
@@ -379,8 +379,6 @@ I first develop propensity scores for each record, or the likelihood of `re_arre
 <br><br> 
 Using "nearest neighbors", or similar propensity scores, 12k records are matched: 6k in the treatment group, and the other 6k not in the treatment group. We see a better balance between the groups given the provided metrics post-matching.
 ```{r, echo=TRUE}
-# What if we changed the data? --------------------------------------------------------------------------
-# Propensity score matching ----------------------------------------------------------------------------
 pScores <- matchit(re_arrest ~ age + prior_arrests + treat, 
                    data = full,
                    method = "nearest", 
@@ -398,7 +396,8 @@ I use a t-test to see whether there is a significant difference in `re_arrest` r
 <br><br>
 These two differing tests suggest that any variation of `re_arrest` rates may not be as attributable to the treatment as one might think. Rather, the variance may be accounted for by non-random assignment, or systematic differences in people that received the treatment and those that did not.
 ```{r, echo=TRUE}
-t.test(full[treat == 1]$re_arrest, full[treat == 0]$re_arrest, paired = F)
-t.test(matchedFull[treat==1]$re_arrest,matchedFull[treat==0]$re_arrest,paired = F)
+tTestFull <- t.test(full[treat == 1]$re_arrest, full[treat == 0]$re_arrest, paired = F)
+tTestMatch <- t.test(matchedFull[treat==1]$re_arrest,matchedFull[treat==0]$re_arrest,paired = F)
 
 ```
+
